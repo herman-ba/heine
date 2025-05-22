@@ -1,4 +1,4 @@
-name: auto-approve-and-merge
+name: merge-instantly
 on:
   pull_request_target:
     types: [opened, reopened, synchronize]
@@ -8,23 +8,10 @@ permissions:
   pull-requests: write
 
 jobs:
-  approve-and-merge:
+  merge-now:
     runs-on: ubuntu-latest
     steps:
-      - name: Approve PR :robot:
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.AUTO_MERGE_PAT }}
-          script: |
-            await github.rest.pulls.createReview({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
-              pull_number: context.payload.pull_request.number,
-              event: "APPROVE",
-              body: "Rubber-stamp auto-approval 🤖"
-            });
-      - name: Merge PR
-        uses: actions/github-script@v7
+      - uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.AUTO_MERGE_PAT }}
           script: |
