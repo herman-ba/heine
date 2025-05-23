@@ -1,0 +1,14 @@
+symbol: "EURUSDT"
+candle_interval: "15m"
+look_back: 96
+horizon: 1
+batch_size: 256
+hidden_size: 256
+num_layers: 3
+dropout: 0.2
+learning_rate: 1e-3
+epochs: 10000
+patience: 50
+device: "auto"
+num_workers: "auto"
+checkpoint_dir: "checkpoints/"
