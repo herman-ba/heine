@@ -18,6 +18,11 @@ python trainer/train.py --config trainer/config.yaml
 
 Arguments specified on the command line override values in the YAML config.
 
+During training, the script logs epoch metrics to `checkpoints/training.log`.
+The file is overwritten at each run. Early stopping waits until the
+`start_epoch` configured in `config.yaml` before counting patience,
+but the best checkpoint can still come from any earlier epoch.
+
 ## Resume or Fine-tune
 
 ```bash

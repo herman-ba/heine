@@ -19,16 +19,19 @@ class ModelCheckpoint:
 
 
 class EarlyStopping:
-    def __init__(self, patience: int) -> None:
+    def __init__(self, patience: int, start_epoch: int = 0) -> None:
         self.patience = patience
+        self.start_epoch = start_epoch
         self.best = float('inf')
+        self.best_epoch = 0
         self.count = 0
 
-    def step(self, val_loss: float) -> bool:
+    def step(self, val_loss: float, epoch: int) -> bool:
         if val_loss < self.best:
             self.best = val_loss
+            self.best_epoch = epoch
             self.count = 0
-        else:
+        elif epoch >= self.start_epoch:
             self.count += 1
         return self.count >= self.patience
 

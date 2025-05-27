@@ -3,12 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import torch
 from tqdm import tqdm
-
-from callbacks import EarlyStopping, ModelCheckpoint, make_scheduler
-from data.dataset import DataConfig, load_dataloaders
-from models.lstm import LSTMModel, masked_mse
 from utils.misc import seed_everything
 
 
@@ -68,12 +63,19 @@ def update_cfg(cfg: dict, args: argparse.Namespace) -> dict:
 
 
 def resolve_device(device: str) -> str:
+    import torch
+
     if device != 'auto':
         return device
     return 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 
 def main() -> None:
+    from callbacks import EarlyStopping, ModelCheckpoint, make_scheduler
+    from data.dataset import DataConfig, load_dataloaders
+    from models.lstm import LSTMModel, masked_mse
+    import torch
+
     args = parse_args()
     cfg = load_config(args.config)
     cfg = update_cfg(cfg, args)
@@ -98,8 +100,12 @@ def main() -> None:
     optim = torch.optim.AdamW(model.parameters(), lr=float(cfg['learning_rate']))
     scheduler = make_scheduler(optim)
 
+    os.makedirs(cfg['checkpoint_dir'], exist_ok=True)
+    log_path = os.path.join(cfg['checkpoint_dir'], 'training.log')
+    log_file = open(log_path, 'w', encoding='utf-8')
+
     checkpoint = ModelCheckpoint(cfg['checkpoint_dir'])
-    early_stop = EarlyStopping(int(cfg['patience']))
+    early_stop = EarlyStopping(int(cfg['patience']), int(cfg.get('start_epoch', 0)))
 
     if args.checkpoint:
         model.load_state_dict(torch.load(args.checkpoint, map_location=cfg['device']))
@@ -131,7 +137,9 @@ def main() -> None:
 
         scheduler.step(val_loss)
         checkpoint.step(val_loss, model)
-        if early_stop.step(val_loss):
+        log_file.write(f"{epoch},{train_loss:.6f},{val_loss:.6f}\n")
+        log_file.flush()
+        if early_stop.step(val_loss, epoch):
             best_epoch = epoch
             break
         best_epoch = epoch
@@ -148,7 +156,23 @@ def main() -> None:
                 loss = masked_mse(pred, y)
                 val_loss += loss.item() * x.size(0)
         val_loss /= len(val_loader.dataset)
-        print(f"Best validation loss: {val_loss:.6f} at epoch {early_stop.best if early_stop.best < float('inf') else best_epoch}")
+        correct = 0
+        total = 0
+        with torch.inference_mode():
+            for x, y in val_loader:
+                x, y = x.to(cfg['device']), y.to(cfg['device'])
+                pred = model(x)
+                last_close = x[:, -1, 3]
+                direction_pred = torch.sign(pred - last_close)
+                direction_true = torch.sign(y - last_close)
+                correct += (direction_pred == direction_true).sum().item()
+                total += direction_true.numel()
+        hit_rate = correct / total if total else 0.0
+        print(
+            f"Best validation loss: {val_loss:.6f} at epoch {early_stop.best_epoch}\n"
+            f"Directional hit rate: {hit_rate:.2%}"
+        )
+    log_file.close()
 
 
 if __name__ == '__main__':

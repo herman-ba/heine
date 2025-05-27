@@ -58,7 +58,7 @@ class ForexDataset(Dataset):
 
 
 def load_dataloaders(cfg: DataConfig) -> Tuple[DataLoader, DataLoader]:
-    df = pd.read_parquet(cfg.path)
+    df = pd.read_parquet(cfg.path, engine="pyarrow")
     df.index = pd.to_datetime(df.index, utc=True)
     df.sort_index(inplace=True)
     df = df[~df.index.duplicated(keep='first')]
