@@ -5,59 +5,72 @@ on:
     types: [opened, reopened, synchronize]
 
 permissions:
-  contents: write      # needed to push to the base branch
-  pull-requests: write # needed to update / close the PR
+  contents: write
+  pull-requests: write
 
 jobs:
   merge-now:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
     steps:
-      # 1 – Get the base branch
+      # 1 – Checkout the PR’s base branch
       - name: Checkout base branch
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.ref }}
           token: ${{ secrets.AUTO_MERGE_PAT }}
 
-      # 2 – Fetch the PR branch locally as "pr"
+      # 2 – Give Git an author identity for the commit(s)
+      - name: Configure Git author
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # 3 – Fetch the PR branch as "pr"
       - name: Fetch PR branch
         run: |
           git fetch --no-tags origin pull/${{ github.event.pull_request.number }}/head:pr
 
-      # 3 – Attempt a merge *without* committing so we can test for conflicts
+      # 4 – Attempt a merge without committing
       - name: Try fast merge
         id: merge
         run: |
           set -eo pipefail
           if git merge --no-commit --no-ff pr; then
-            echo "MERGE_SUCCESS=true" >> "$GITHUB_OUTPUT"
+            echo "MERGE_SUCCESS=true"  >> "$GITHUB_OUTPUT"
           else
             echo "MERGE_SUCCESS=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # 4 – When merge conflicts exist, resolve them by removing the old files
-      - name: Resolve conflicts in favour of PR files
+      # 5 – Resolve conflicts by deleting the base-branch copies
+      - name: Resolve conflicts (prefer PR versions)
         if: steps.merge.outputs.MERGE_SUCCESS == 'false'
         run: |
           echo "🔧 Conflicts detected – preferring PR versions…"
-          # list the conflicted paths
           git diff --name-only --diff-filter=U > conflicts.txt
           while IFS= read -r file; do
-            # Drop the base-branch copy…
-            git rm --cached --quiet "$file"
-            # …and replace it with the PR copy
-            git checkout pr -- "$file"
+            git rm --cached --quiet "$file"   # drop base copy
+            git checkout pr -- "$file"        # restore PR copy
           done < conflicts.txt
           rm conflicts.txt
           git add .
           git commit -m "chore: auto-resolve merge conflicts by deleting base versions"
 
-      # 5 – Push to the base branch (closes the PR as "Merged" automatically)
+      # 6 – If the merge was clean, we still need to commit it
+      - name: Commit clean merge
+        if: steps.merge.outputs.MERGE_SUCCESS == 'true'
+        run: |
+          git commit -m "chore: auto-merge PR #${{ github.event.pull_request.number }}"
+
+      # 7 – Push to the base branch (closes the PR as merged)
       - name: Push merged changes
         run: |
           git push origin HEAD:${{ github.event.pull_request.base.ref }}
 
-      # 6 – (Edge case) ensure PR is marked as merged / closed
+      # 8 – Safety-net: ensure PR is closed
       - name: Ensure PR is closed
         uses: actions/github-script@v7
         with:
@@ -65,12 +78,7 @@ jobs:
           script: |
             const {owner, repo} = context.repo;
             const number = context.payload.pull_request.number;
-            const pr   = await github.rest.pulls.get({owner, repo, pull_number: number});
+            const pr = await github.rest.pulls.get({owner, repo, pull_number: number});
             if (pr.data.state !== "closed") {
-              await github.rest.pulls.update({
-                owner,
-                repo,
-                pull_number: number,
-                state: "closed"
-              });
+              await github.rest.pulls.update({owner, repo, pull_number: number, state: "closed"});
             }
