@@ -1,102 +1,113 @@
-name: merge-instantly
+name: auto-merge-prefer-pr
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize]
+    # Run on every update except while the PR is a draft
+    types: [opened, reopened, ready_for_review, synchronize]
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: write          # push to base branch
+  pull-requests: write     # (not strictly needed now, but handy)
 
 jobs:
-  merge-now:
+  merge-prefer-pr:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
+    if: github.event.pull_request.draft == false   # skip drafts
+    env:
+      BASE_REF:   ${{ github.event.pull_request.base.ref }}
+      PR_NUM:     ${{ github.event.pull_request.number }}
+      PR_REF:     pull/${{ github.event.pull_request.number }}/head
+      GIT_TOKEN:  ${{ secrets.AUTO_MERGE_PAT }}
 
     steps:
-      # 1 – Check out the PR’s base branch
-      - name: Checkout base branch
-        uses: actions/checkout@v4
-        with:
-          ref:  ${{ github.event.pull_request.base.ref }}
-          token: ${{ secrets.AUTO_MERGE_PAT }}
+    # -----------------------------------------------------------------
+    # 1.  Prepare repository & Git identity
+    # -----------------------------------------------------------------
+    - name: Checkout base branch
+      uses: actions/checkout@v4
+      with:
+        ref:          ${{ env.BASE_REF }}
+        token:        ${{ env.GIT_TOKEN }}
+        fetch-depth:  0            # full history (needed for merge)
 
-      # 2 – Configure an author for any commits we create
-      - name: Configure Git author
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    - name: Configure Git author
+      run: |
+        git config user.name  "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      # 3 – Fetch the PR branch locally as `pr`
-      - name: Fetch PR branch
-        run: |
-          git fetch --no-tags origin \
-            pull/${{ github.event.pull_request.number }}/head:pr
+    - name: Fetch PR branch locally
+      run: |
+        git fetch --no-tags origin ${{ env.PR_REF }}:pr
 
-      # 4 – Try to merge without committing yet
-      - name: Try fast merge
-        id: merge
-        run: |
-          set -eo pipefail
-          if git merge --no-commit --no-ff pr; then
-            echo "MERGE_SUCCESS=true"  >>"$GITHUB_OUTPUT"
-          else
-            echo "MERGE_SUCCESS=false" >>"$GITHUB_OUTPUT"
-          fi
+    # -----------------------------------------------------------------
+    # 2.  Fast-exit if the PR head is *already* in the base branch
+    # -----------------------------------------------------------------
+    - name: Check if merge already contained
+      id: already
+      run: |
+        if git merge-base --is-ancestor pr HEAD; then
+          echo "merged=true" >>"$GITHUB_OUTPUT"
+        else
+          echo "merged=false" >>"$GITHUB_OUTPUT"
+        fi
 
-      # 5 – If there are conflicts, delete the base-branch copies and keep the PR copies
-      - name: Resolve conflicts (prefer PR versions)
-        if: steps.merge.outputs.MERGE_SUCCESS == 'false'
-        run: |
-          echo "🔧 Conflicts detected – preferring PR versions…"
+    - name: Short-circuit (nothing to do)
+      if: steps.already.outputs.merged == 'true'
+      run: echo "✅ Base branch already contains PR head – nothing to do."
 
-          # List conflicted files (if any)
-          git diff --name-only --diff-filter=U > conflicts.txt
-          if [ -s conflicts.txt ]; then
-            while IFS= read -r file; do
-              git rm --cached --quiet "$file"      # drop base copy
-              git checkout pr -- "$file"           # restore PR copy
-            done < conflicts.txt
-            git add .
-          else
-            echo "ℹ️  No unmerged paths found after merge attempt."
-          fi
-          rm conflicts.txt
+    # -----------------------------------------------------------------
+    # 3.  Try a non-committing merge
+    # -----------------------------------------------------------------
+    - name: Attempt merge (no commit yet)
+      if: steps.already.outputs.merged != 'true'
+      id: trymerge
+      run: |
+        set +e                                  # we want exit-code
+        git merge --no-commit --no-ff pr
+        echo "result=$?" >>"$GITHUB_OUTPUT"
+        set -e
 
-          # Only commit if something is staged
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: auto-resolve merge conflicts (keep PR versions)"
-          else
-            echo "ℹ️  Nothing to commit after conflict-resolution step."
-          fi
+    # -----------------------------------------------------------------
+    # 4.  Conflict-resolver – keep the PR’s versions
+    # -----------------------------------------------------------------
+    - name: Resolve conflicts by keeping PR files
+      if: |
+        steps.already.outputs.merged != 'true' &&
+        steps.trymerge.outputs.result != '0'
+      run: |
+        echo "🔧 Conflicts detected – preferring PR versions…"
+        git diff --name-only --diff-filter=U > conflicts.txt
 
-      # 6 – When the merge was clean, a commit is still needed *unless* it was
-      #     already a fast-forward / identical tree.
-      - name: Commit clean merge (if needed)
-        if: steps.merge.outputs.MERGE_SUCCESS == 'true'
-        run: |
-          if git diff --cached --quiet; then
-            echo "ℹ️  No changes to commit – merge was already up-to-date."
-          else
-            git commit -m "chore: auto-merge PR #${{ github.event.pull_request.number }}"
-          fi
+        if [ ! -s conflicts.txt ]; then
+          echo "ℹ️  No unmerged paths found – nothing to resolve."
+        else
+          while IFS= read -r file; do
+            git rm  --cached --quiet "$file"   # drop base copy
+            git checkout pr -- "$file"         # restore PR copy
+          done < conflicts.txt
+        fi
 
-      # 7 – Push the result to the base branch (closes the PR as “merged”)
-      - name: Push merged changes
-        run: |
-          git push origin HEAD:${{ github.event.pull_request.base.ref }}
+    # -----------------------------------------------------------------
+    # 5.  Finalise *one* merge commit – always
+    # -----------------------------------------------------------------
+    - name: Finalise merge commit
+      if: steps.already.outputs.merged != 'true'
+      run: |
+        # Stage everything (if anything changed)
+        git add -A
 
-      # 8 – Safety net: ensure the PR is marked closed
-      - name: Ensure PR is closed
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.AUTO_MERGE_PAT }}
-          script: |
-            const {owner, repo} = context.repo;
-            const number = context.payload.pull_request.number;
-            const pr = await github.rest.pulls.get({owner, repo, pull_number: number});
-            if (pr.data.state !== "closed") {
-              await github.rest.pulls.update({owner, repo, pull_number: number, state: "closed"});
-            }
+        # Always create the merge commit.  --allow-empty lets us create it
+        # even if the tree is identical to HEAD (rare but safe).
+        git commit --allow-empty \
+          -m "chore: auto-merge PR #${{ env.PR_NUM }}  
+              
+              * Strategy: keep PR versions on conflict  
+              * Workflow: auto-merge-prefer-pr"
+
+    # -----------------------------------------------------------------
+    # 6.  Push – GitHub will automatically mark the PR as *Merged*
+    # -----------------------------------------------------------------
+    - name: Push to base branch
+      if: steps.already.outputs.merged != 'true'
+      run: |
+        git push origin HEAD:${{ env.BASE_REF }}
