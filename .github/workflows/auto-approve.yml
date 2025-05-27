@@ -16,61 +16,79 @@ jobs:
         shell: bash
 
     steps:
-      # 1 – Checkout the PR’s base branch
+      # 1 – Check out the PR’s base branch
       - name: Checkout base branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.ref }}
+          ref:  ${{ github.event.pull_request.base.ref }}
           token: ${{ secrets.AUTO_MERGE_PAT }}
 
-      # 2 – Give Git an author identity for the commit(s)
+      # 2 – Configure an author for any commits we create
       - name: Configure Git author
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      # 3 – Fetch the PR branch as "pr"
+      # 3 – Fetch the PR branch locally as `pr`
       - name: Fetch PR branch
         run: |
-          git fetch --no-tags origin pull/${{ github.event.pull_request.number }}/head:pr
+          git fetch --no-tags origin \
+            pull/${{ github.event.pull_request.number }}/head:pr
 
-      # 4 – Attempt a merge without committing
+      # 4 – Try to merge without committing yet
       - name: Try fast merge
         id: merge
         run: |
           set -eo pipefail
           if git merge --no-commit --no-ff pr; then
-            echo "MERGE_SUCCESS=true"  >> "$GITHUB_OUTPUT"
+            echo "MERGE_SUCCESS=true"  >>"$GITHUB_OUTPUT"
           else
-            echo "MERGE_SUCCESS=false" >> "$GITHUB_OUTPUT"
+            echo "MERGE_SUCCESS=false" >>"$GITHUB_OUTPUT"
           fi
 
-      # 5 – Resolve conflicts by deleting the base-branch copies
+      # 5 – If there are conflicts, delete the base-branch copies and keep the PR copies
       - name: Resolve conflicts (prefer PR versions)
         if: steps.merge.outputs.MERGE_SUCCESS == 'false'
         run: |
           echo "🔧 Conflicts detected – preferring PR versions…"
-          git diff --name-only --diff-filter=U > conflicts.txt
-          while IFS= read -r file; do
-            git rm --cached --quiet "$file"   # drop base copy
-            git checkout pr -- "$file"        # restore PR copy
-          done < conflicts.txt
-          rm conflicts.txt
-          git add .
-          git commit -m "chore: auto-resolve merge conflicts by deleting base versions"
 
-      # 6 – If the merge was clean, we still need to commit it
-      - name: Commit clean merge
+          # List conflicted files (if any)
+          git diff --name-only --diff-filter=U > conflicts.txt
+          if [ -s conflicts.txt ]; then
+            while IFS= read -r file; do
+              git rm --cached --quiet "$file"      # drop base copy
+              git checkout pr -- "$file"           # restore PR copy
+            done < conflicts.txt
+            git add .
+          else
+            echo "ℹ️  No unmerged paths found after merge attempt."
+          fi
+          rm conflicts.txt
+
+          # Only commit if something is staged
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: auto-resolve merge conflicts (keep PR versions)"
+          else
+            echo "ℹ️  Nothing to commit after conflict-resolution step."
+          fi
+
+      # 6 – When the merge was clean, a commit is still needed *unless* it was
+      #     already a fast-forward / identical tree.
+      - name: Commit clean merge (if needed)
         if: steps.merge.outputs.MERGE_SUCCESS == 'true'
         run: |
-          git commit -m "chore: auto-merge PR #${{ github.event.pull_request.number }}"
+          if git diff --cached --quiet; then
+            echo "ℹ️  No changes to commit – merge was already up-to-date."
+          else
+            git commit -m "chore: auto-merge PR #${{ github.event.pull_request.number }}"
+          fi
 
-      # 7 – Push to the base branch (closes the PR as merged)
+      # 7 – Push the result to the base branch (closes the PR as “merged”)
       - name: Push merged changes
         run: |
           git push origin HEAD:${{ github.event.pull_request.base.ref }}
 
-      # 8 – Safety-net: ensure PR is closed
+      # 8 – Safety net: ensure the PR is marked closed
       - name: Ensure PR is closed
         uses: actions/github-script@v7
         with:
